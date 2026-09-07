@@ -74,42 +74,70 @@ tiered by how much authority they carry.
 
 | Group | Weight | Tier | Examples |
 | --- | --- | --- | --- |
-| Offer | 10 | **Can notify** | `offer letter`, `excited to offer`, `pleased to extend` |
-| Interview | 10 | **Can notify** | `interview invitation`, `interview is scheduled`, `ai interview`, `one way interview`, `you have been shortlisted`, `hirevue` |
-| Assessment | 10 | **Can notify** | `coding challenge`, `take home assignment`, `hackerrank` |
+| Offer letter | 10 | **Can notify** | `offer letter`, `offer of employment`, `appointment letter`, `pleased to extend`, `your joining date` |
+| Interview invitation | 10 | **Can notify** | `interview invitation`, `interview is scheduled`, `ai interview`, `one way interview`, `you have been shortlisted`, `hirevue` |
+| Assessment or test | 10 | **Can notify** | `coding challenge`, `take home assignment`, `hackerrank` |
 | Interview platform domain | 10 | **Can notify** | `hirevue.com`, `willo.video`, `micro1.ai`, `karat.io` |
-| Scheduling / ambiguous | 4 | Review only | `interview with`, `your availability`, `calendly.com`, `next steps` |
-| Recruiter / acknowledgements | 3 | Score only | `your application`, `thank you for applying`, `job opportunity` |
+| Ambiguous interview wording | 4 | Review only | `interview with`, `interview for`, `interview process`, `interviewer` |
+| Scheduling wording | 4 | Review only | `your availability`, `calendly.com`, `next steps`, `quick call` |
+| Recruiter outreach | 3 | **Recruiter list only** | `job opportunity`, `we are hiring`, `your application`, `thank you for applying` |
+| Addressed to you | 2 | Score only | `your candidacy`, `you applied`, `we received your` |
 | Job context | 1 | Score only | `hiring`, `resume`, `salary`, `position` |
+| Job alerts and marketing | — | **Blocks notifications** | `job alert`, `jobs for you`, `apply now`, `webinar`, `off your first` |
 | Hiring platform domain | 3 | Score only | `greenhouse.io`, `lever.co`, `rozee.pk` |
 
-### The three verdicts
+### The four verdicts
 
-**Flagged** — listed *and* notified. Requires either:
+**Flagged** — listed *and* notified. Requires **decisive** wording, which means
+one of:
 
-- one **Can notify** phrase, or
-- two separate **Review only** phrases *plus* job wording somewhere in the mail,
+- one **Can notify** phrase;
+- mail from a video or AI interview platform, which is an interview task by
+  definition; or
+- ambiguous interview wording backed by *both* scheduling wording and job
+  wording — `"Interview with Acme"` plus a Calendly link plus `position`;
 
-and a total score of at least the **notify threshold** (default 10).
+plus a total score of at least the **notify threshold** (default 10), and no
+veto (below).
 
-**Needs review** — listed under its own chip, never notified. Weaker evidence
-than the above but score ≥ **review threshold** (default 4). This tier exists so
-a vaguely worded real invitation is never silently dropped.
+**Needs review** — listed under its own chip, never notified. Suggestive but not
+decisive, and score ≥ **review threshold** (default 4). This tier exists so a
+vaguely worded real invitation is never silently dropped.
 
-**Ignored** — everything else, including all recruiter acknowledgements. Visible
-only via the *Show everything* switch.
+**Recruiter** — listed under its own chip, never notified, *whatever it scores*.
+Cold outreach, "job opportunity" mail, application acknowledgements and job
+digests. This is the tier that fixes the app's original failure mode: a
+recruiter mail stacking `next steps` + `invite you to` + `job opportunity` used
+to reach the notify threshold with no interview and no offer in it. A mail in
+this class is now structurally incapable of notifying — no combination of
+phrases can promote it.
 
-### Two-signal promotion
+**Ignored** — everything else. Visible only via *Show everything*.
 
-One ambiguous signal is noise; two independent ones in a mail that is
-demonstrably about employment is a pattern.
+### The three vetoes
 
-- `"Interview with Acme Corp"` + a Calendly link + `position` → **flagged**
-  (two ambiguous signals, plus job wording)
-- `"Please confirm your availability"` + a Calendly link, no job wording →
-  **needs review** (the dentist case)
-- `"Read our interview with the CEO"` in a newsletter → **needs review**
-  (one ambiguous signal only)
+1. **Rejection wording** suppresses the mail, unless an *Offer* phrase also
+   matched.
+2. **Job-alert and marketing wording** blocks the notification unless the
+   decisive phrase is in the **subject line**, or the sender is an interview
+   platform. Job boards paste whole job descriptions into their digests, so
+   `technical interview` and `offer of employment` turn up in the body of mail
+   addressed to nobody in particular.
+3. **Recruiter wording with nothing decisive of its own** can only ever be
+   filed under *Recruiter*.
+
+Worked examples:
+
+| Mail | Verdict |
+| --- | --- |
+| `"Interview invitation — Backend Engineer"` | **Flagged**, notified |
+| `"Offer letter"` in the body of a mail titled `"Acme"` | **Flagged**, notified |
+| `"Interview with Acme Corp"` + Calendly link + `position` | **Flagged**, notified |
+| `"Exciting job opportunity at Acme — next steps, let me know your availability"` | **Recruiter**, never notified |
+| `"Jobs for you: 12 new roles"` quoting `technical interview` in the body | **Recruiter**, never notified |
+| `"Read our interview with the CEO"` in a newsletter | **Needs review** |
+| `"Please confirm your availability"` + Calendly, no job wording | **Needs review** (the dentist case) |
+| `"Special offer — 20% off your next purchase"` | **Ignored** |
 
 ### Deliberate omissions
 
@@ -138,16 +166,61 @@ Everything above is editable in **Settings → Detection rules**, including each
 group's tier via its **Authority** dropdown. Each edit immediately rescores the
 cached mail, so the effect is visible without waiting for the next poll.
 
-- **Missing mail you wanted?** Check the *Needs review* chip first — it usually
-  landed there. Add its exact wording to the Interview or Offer group to have it
-  notified in future.
+- **Missing mail you wanted?** Check the *Needs review* and *Recruiter* chips
+  first — it usually landed in one of them. Add its exact wording to the
+  Interview or Offer group to have it notified in future, then use **Settings →
+  Re-scan the inbox**.
 - **Too much noise?** Raise the notify threshold, or add the sender under
   **Muted senders** (LinkedIn/Indeed job-alert digests are the usual culprits).
-- **Want recruiter outreach back?** Set the Recruiter group's Authority to
+- **Want recruiter outreach to notify?** Set the Recruiter group's Authority to
   *Can notify*.
 
 Manually marking a message pins the decision — later rule changes leave it
-alone.
+alone. Pinned rows show a 📌 in the list.
+
+---
+
+## How fetching works
+
+The naive design — read the newest *N* messages every run and discard the ones
+already stored — downloads tens of full messages every 15 minutes to discover,
+almost always, that nothing has changed. At the default poll that is thousands
+of redundant full-message downloads a day.
+
+IMAP UIDs only ever increase within a mailbox, so the highest UID already
+stored is a valid cursor. The app stores it alongside the mailbox's
+`UIDVALIDITY`, because a UID means nothing across two incarnations of a
+mailbox.
+
+| Situation | Cost of the pass |
+| --- | --- |
+| `UIDNEXT` proves nothing arrived | one `SELECT`, no `FETCH` at all |
+| New mail | `UID FETCH <cursor+1>:*` — only the new messages |
+| First sync, or `UIDVALIDITY` changed | the newest *N* messages (Settings → *Messages read on a first sync*) |
+| Cache empty but a cursor stored (schema rebuild) | treated as a first sync, so the list is never left blank |
+
+Two details that matter:
+
+- **`n:*` still returns the last message** even when its UID is below `n`, so
+  the range is enforced again on the client.
+- **The cursor moves only after the rows are committed.** A crash between the
+  two would otherwise skip that mail permanently.
+
+A backlog larger than 60 messages is worked through oldest-first over
+consecutive runs, so a phone that was offline for a week never has to do it all
+inside one 10-minute WorkManager slot.
+
+### Large messages are no longer scored on the subject alone
+
+HTML recruiting mail with an image signature routinely exceeds the initial
+download limit, and mail fetched as envelope-only has no body for the rules to
+read. That silently reduced real interview invitations to subject-line
+scoring — and a subject like `"Acme Corp"` scores nothing.
+
+Messages that arrive without text now get a second round trip that fetches
+their **non-attachment parts only**, so a 20 MB mail with a PDF attached costs
+a few kilobytes of text. That pass is capped at 15 messages per sync so a
+mailbox full of newsletters cannot stall a background run.
 
 ---
 
@@ -156,21 +229,29 @@ alone.
 ```
 lib/
   models/
-    mail_item.dart          MailItem + MailCategory, DB row mapping, Gmail deep link
-    rule_set.dart           Rule groups, weights, and the shipped defaults
+    mail_item.dart          MailItem, verdicts, categories, DB row mapping, Gmail deep link
+    rule_set.dart           Rule groups, tiers, weights, and the shipped defaults
   services/
     classifier.dart         The scoring engine. Pure Dart, fully unit-tested.
-    imap_service.dart       enough_mail wrapper: connect, fetch newest N, HTML strip
+    imap_service.dart       enough_mail wrapper: incremental UID fetch, body backfill, HTML strip
     credentials_store.dart  App Password in the Android Keystore
-    settings_store.dart     SharedPreferences; reloads on every read (two isolates)
-    mail_database.dart      sqflite cache, notified/archived flags, pruning
-    notification_service.dart  Channel setup + posting; works in either isolate
+    settings_store.dart     SharedPreferences + the UID cursor; reloads on every read
+    mail_database.dart      sqflite cache, notified/archived flags, search, pruning
+    notification_service.dart  Two channels, tap routing; works in either isolate
     sync_service.dart       fetch -> classify -> store -> notify. Isolate-agnostic.
     background.dart         WorkManager entry point and scheduling
   state/app_state.dart      ChangeNotifier the UI listens to
-  ui/                       login, list, detail (with the audit trail), settings, rules editor
+  ui/
+    theme.dart              Both themes, built from one seed
+    category_style.dart     Per-category colour and icon, with a dark-mode tone
+    home_screen.dart        Search, filter chips, date-grouped list, swipe actions
+    mail_detail_screen.dart One message plus the audit trail
+    login_screen.dart       App Password sign-in
+    settings_screen.dart    Account, notifications, sync, detection, danger zone
+    rules_editor_screen.dart  Every phrase list and tier, editable
 test/
-  classifier_test.dart      Notify/review/ignore tiers, two-signal promotion, vetoes, serialisation
+  classifier_test.dart      Verdict tiers, promotion, all three vetoes, serialisation
+  html_strip_test.dart      HTML-only mail survives the strip step
   mail_item_test.dart       DB round trip, notification-id range, deep-link building
 ```
 
@@ -188,10 +269,10 @@ These are properties of the chosen design, not bugs.
   Gmail Pub/Sub → FCM path, which needs a Google Cloud project with billing, a
   backend, and OAuth instead of an App Password.
 - **OEM battery managers can still skip runs** even with the exemption set.
-- **Large messages are fetched as headers only** (128 KB limit) to keep mobile
-  data down, so only their subject is scored.
+- **A message whose text-part backfill fails stays subject-only.** The detail
+  screen says so explicitly rather than showing an empty body.
 - **INBOX only.** Mail that a Gmail filter has already routed to a label and out
-  of the inbox is not seen.
+  of the inbox — or into Spam — is not seen.
 - **Rules are keyword-based**, so unusual or non-English phrasing can slip
   through. Add the wording under Settings → Detection rules when it does.
 - **The engine is tuned for precision, so some genuine mail will land in *Needs
@@ -200,9 +281,9 @@ These are properties of the chosen design, not bugs.
   that chip periodically — it is the deliberate safety net, not a bug. Nothing
   is ever silently discarded: the *Show everything* switch reveals even ignored
   mail and rejections.
-- **Recruiter mail and application acknowledgements are ignored by default**,
-  per the configured behaviour. Flip the Recruiter group's Authority to *Can
-  notify* to change that.
+- **Recruiter mail and application acknowledgements never notify.** They are
+  listed under the *Recruiter* chip. Flip that group's Authority to *Can notify*
+  if you want them to buzz.
 - Foreground syncs mark mail as notified without buzzing — you are already
   looking at the list.
 
@@ -212,7 +293,7 @@ These are properties of the chosen design, not bugs.
 
 ```powershell
 flutter analyze              # must report: No issues found
-flutter test                 # 63 tests
+flutter test                 # 77 tests
 flutter run
 flutter build apk --release
 ```
