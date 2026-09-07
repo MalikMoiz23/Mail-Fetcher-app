@@ -53,6 +53,30 @@ void main() {
     expect(result.verdict, MailVerdict.notify);
   });
 
+  test('numeric and named entities do not split a phrase in two', () {
+    // Mail written in Outlook or Word is full of curly quotes and dashes
+    // encoded as entities. Left in place they break phrase matching.
+    final text = ImapService.stripHtml(
+      '<p>We&rsquo;d like to schedule an&#8201;interview with you.</p>',
+    );
+    final result = Classifier(RuleSet.defaults).classify(
+      subject: 'Acme',
+      body: text,
+      fromEmail: 'hiring@acme.com',
+    );
+    expect(result.verdict, MailVerdict.notify);
+  });
+
+  test('comments and head blocks are dropped', () {
+    expect(
+      ImapService.stripHtml(
+        '<head><title>x</title></head><!--[if mso]>junk<![endif]--><p>Offer '
+        'letter</p>',
+      ),
+      'Offer letter',
+    );
+  });
+
   test('unclosed and malformed tags do not swallow the text', () {
     // Real mail contains broken markup; losing the body here would silently
     // downgrade the mail to subject-only scoring.

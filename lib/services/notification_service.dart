@@ -12,13 +12,41 @@ class NotificationService {
   static final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
-  static const String _channelId = 'important_mail_v1';
-  static const String _channelName = 'Important mail';
-  static const String _channelDescription =
-      'Interviews, offers and assessments detected in your inbox.';
+  /// Interviews and offers. Separate from assessments so the two can be
+  /// silenced independently in Android's own settings, and so an offer never
+  /// arrives with the same weight as a coding test.
+  static const AndroidNotificationChannel _urgentChannel =
+      AndroidNotificationChannel(
+        'interviews_offers_v1',
+        'Interviews and offers',
+        description:
+            'Interview invitations and job offers detected in your inbox.',
+        // max, not high: the entire point of the app is that these must not be
+        // missed.
+        importance: Importance.max,
+      );
+
+  /// Assessments and tests. Deadline-bearing but not an appointment, so they
+  /// get their own, quieter channel.
+  static const AndroidNotificationChannel _taskChannel =
+      AndroidNotificationChannel(
+        'assessments_v1',
+        'Assessments and tests',
+        description: 'Coding tests and take-home assignments to complete.',
+        importance: Importance.high,
+      );
 
   /// Groups the per-message notifications under one heading in the shade.
   static const String _groupKey = 'important_mail_group';
+
+  /// Id of the summary notification that heads the group. Well above any UID
+  /// remainder so it cannot collide with a message.
+  static const int _summaryId = 2147483646;
+
+  /// Called with a message UID when the user taps a notification. Set by the
+  /// UI layer; unset in the background isolate, where there is nothing to
+  /// navigate.
+  static void Function(int uid)? onMailTapped;
 
   static bool _initialized = false;
 
@@ -28,22 +56,32 @@ class NotificationService {
       settings: const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       ),
+      onDidReceiveNotificationResponse: _handleResponse,
     );
-    await _plugin
+    final android = _plugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
-        >()
-        ?.createNotificationChannel(
-          const AndroidNotificationChannel(
-            _channelId,
-            _channelName,
-            description: _channelDescription,
-            // max, not high: the entire point of the app is that these must not
-            // be missed.
-            importance: Importance.max,
-          ),
-        );
+        >();
+    await android?.createNotificationChannel(_urgentChannel);
+    await android?.createNotificationChannel(_taskChannel);
     _initialized = true;
+  }
+
+  static void _handleResponse(NotificationResponse response) {
+    final payload = response.payload;
+    if (payload == null) return;
+    final uid = int.tryParse(payload);
+    if (uid != null) onMailTapped?.call(uid);
+  }
+
+  /// UID of the message whose notification launched the app from cold, or
+  /// `null` when it was started normally.
+  static Future<int?> launchedFromMailUid() async {
+    await init();
+    final details = await _plugin.getNotificationAppLaunchDetails();
+    if (details?.didNotificationLaunchApp != true) return null;
+    final payload = details?.notificationResponse?.payload;
+    return payload == null ? null : int.tryParse(payload);
   }
 
   /// Android 13+ gates notifications behind a runtime permission. Returns
@@ -69,8 +107,12 @@ class NotificationService {
     return enabled ?? false;
   }
 
+  static AndroidNotificationChannel _channelFor(MailCategory category) =>
+      category == MailCategory.assessment ? _taskChannel : _urgentChannel;
+
   static Future<void> showMail(MailItem item) async {
     await init();
+    final channel = _channelFor(item.category);
     final body = item.snippet.isEmpty
         ? item.displayFrom
         : '${item.displayFrom} — ${item.snippet}';
@@ -81,10 +123,10 @@ class NotificationService {
       payload: item.uid.toString(),
       notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.max,
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
+          importance: channel.importance,
           priority: Priority.high,
           groupKey: _groupKey,
           category: AndroidNotificationCategory.email,
@@ -98,20 +140,56 @@ class NotificationService {
     );
   }
 
+  /// Heads the group with a one-line summary. Without it Android shows a bare
+  /// "2 notifications" row, which says nothing about what arrived.
+  static Future<void> showSummary(List<MailItem> items) async {
+    if (items.length < 2) return;
+    await init();
+    final byCategory = <MailCategory, int>{};
+    for (final item in items) {
+      byCategory[item.category] = (byCategory[item.category] ?? 0) + 1;
+    }
+    final parts = byCategory.entries
+        .map((MapEntry<MailCategory, int> e) => '${e.value} ${e.key.label}')
+        .join(' · ');
+    await _plugin.show(
+      id: _summaryId,
+      title: '${items.length} messages need you',
+      body: parts,
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          _urgentChannel.id,
+          _urgentChannel.name,
+          channelDescription: _urgentChannel.description,
+          importance: Importance.max,
+          priority: Priority.high,
+          groupKey: _groupKey,
+          setAsGroupSummary: true,
+          styleInformation: InboxStyleInformation(
+            items
+                .map((MailItem item) => item.subject)
+                .toList(growable: false),
+            contentTitle: '${items.length} messages need you',
+            summaryText: parts,
+          ),
+        ),
+      ),
+    );
+  }
+
   static Future<void> showTest() async {
     await init();
     await _plugin.show(
       id: 0,
-      title: 'Interview: Test notification',
+      title: 'Test alert',
       body: 'If you can see this, background alerts will reach you.',
-      notificationDetails: const NotificationDetails(
+      notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
+          _urgentChannel.id,
+          _urgentChannel.name,
+          channelDescription: _urgentChannel.description,
           importance: Importance.max,
           priority: Priority.high,
-          groupKey: _groupKey,
         ),
       ),
     );

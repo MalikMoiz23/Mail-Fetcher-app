@@ -50,9 +50,25 @@ void main() {
 
   test('only the notify verdict is notifiable', () {
     expect(item(verdict: MailVerdict.notify).shouldNotify, isTrue);
-    expect(item(verdict: MailVerdict.review).shouldNotify, isFalse);
-    expect(item(verdict: MailVerdict.rejected).shouldNotify, isFalse);
-    expect(item(verdict: MailVerdict.ignore).shouldNotify, isFalse);
+    for (final verdict in MailVerdict.values.where(
+      (MailVerdict v) => v != MailVerdict.notify,
+    )) {
+      expect(
+        item(verdict: verdict).shouldNotify,
+        isFalse,
+        reason: '$verdict must never reach the notification shade',
+      );
+    }
+  });
+
+  test('recruiter mail is labelled by its verdict, not its category', () {
+    expect(
+      item(
+        verdict: MailVerdict.informational,
+        category: MailCategory.recruiter,
+      ).displayLabel,
+      'Recruiter',
+    );
   });
 
   test('the row label reports the verdict when it matters more', () {

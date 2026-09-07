@@ -14,8 +14,10 @@ class MailDatabase {
 
   static const String _table = 'mails';
 
-  /// v2 replaced the boolean `is_important` with the three-state `verdict`.
-  static const int _version = 2;
+  /// v2 replaced the boolean `is_important` with a three-state `verdict`.
+  /// v3 added the `informational` verdict, so every cached row has to be
+  /// rescored by the current rules rather than reinterpreted.
+  static const int _version = 3;
 
   static Database? _db;
 
@@ -61,13 +63,39 @@ class MailDatabase {
     await db.execute(
       'CREATE INDEX idx_mails_verdict_date ON $_table (verdict, date_ms DESC)',
     );
+    await db.execute(
+      'CREATE INDEX idx_mails_category_date ON $_table (category, date_ms DESC)',
+    );
   }
 
-  /// UIDs already stored, so a sync only classifies genuinely new mail.
-  static Future<Set<int>> knownUids() async {
+  /// Whether the cache holds anything at all.
+  ///
+  /// The sync uses this to decide it needs a fresh baseline: a stored UID
+  /// cursor with an empty table would otherwise leave the list blank until new
+  /// mail happened to arrive, which is exactly what a schema rebuild causes.
+  static Future<int> rowCount() async {
     final db = await _open();
-    final rows = await db.query(_table, columns: <String>['uid']);
-    return rows.map((Map<String, Object?> row) => row['uid']! as int).toSet();
+    final rows = await db.rawQuery('SELECT COUNT(*) AS n FROM $_table');
+    return (rows.first['n'] as int?) ?? 0;
+  }
+
+  /// Highest stored UID, used to recover the sync cursor when the stored one is
+  /// missing but the cache is not.
+  static Future<int?> highestUid() async {
+    final db = await _open();
+    final rows = await db.rawQuery('SELECT MAX(uid) AS m FROM $_table');
+    return rows.first['m'] as int?;
+  }
+
+  static Future<MailItem?> byUid(int uid) async {
+    final db = await _open();
+    final rows = await db.query(
+      _table,
+      where: 'uid = ?',
+      whereArgs: <Object?>[uid],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : MailItem.fromMap(rows.first);
   }
 
   /// Inserts only rows whose UID is new. Existing rows keep their `notified`,
@@ -123,6 +151,7 @@ class MailDatabase {
     required Set<MailVerdict> verdicts,
     MailCategory? category,
     bool includeArchived = false,
+    String query = '',
   }) async {
     if (verdicts.isEmpty) return const <MailItem>[];
     final db = await _open();
@@ -135,6 +164,17 @@ class MailDatabase {
     if (category != null) {
       clauses.add('category = ?');
       args.add(category.name);
+    }
+    final needle = query.trim();
+    if (needle.isNotEmpty) {
+      // Searching in SQL rather than filtering the loaded page means the whole
+      // cache is searchable, not just the newest few hundred rows.
+      clauses.add(
+        '(subject LIKE ? OR from_name LIKE ? OR from_email LIKE ? '
+        'OR body LIKE ?)',
+      );
+      final pattern = '%$needle%';
+      args.addAll(<Object?>[pattern, pattern, pattern, pattern]);
     }
     final rows = await db.query(
       _table,
@@ -224,6 +264,34 @@ class MailDatabase {
       for (final row in rows)
         MailVerdict.byName(row['verdict']! as String): row['n']! as int,
     };
+  }
+
+  /// Number of flagged rows per category, for the per-category chip counts.
+  /// Only notified mail is counted, because that is what those chips show.
+  static Future<Map<MailCategory, int>> countsByCategory() async {
+    final db = await _open();
+    final rows = await db.rawQuery(
+      'SELECT category, COUNT(*) AS n FROM $_table '
+      'WHERE archived = 0 AND verdict = ? GROUP BY category',
+      <Object?>[MailVerdict.notify.name],
+    );
+    return <MailCategory, int>{
+      for (final row in rows)
+        MailCategory.byName(row['category']! as String): row['n']! as int,
+    };
+  }
+
+  /// Rows the user archived, newest first. Kept for the archive view so a swipe
+  /// is recoverable long after the undo snackbar has gone.
+  static Future<List<MailItem>> archived() async {
+    final db = await _open();
+    final rows = await db.query(
+      _table,
+      where: 'archived = 1',
+      orderBy: 'date_ms DESC',
+      limit: 200,
+    );
+    return rows.map(MailItem.fromMap).toList(growable: false);
   }
 
   /// Drops the oldest rows beyond [keep].

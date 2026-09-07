@@ -12,15 +12,17 @@ import '../services/sync_service.dart';
 
 /// The list's top-level filter chips.
 enum InboxFilter {
-  all('All'),
-  offers('Offers'),
-  interviews('Interviews'),
-  assessments('Assessments'),
-  needsReview('Needs review');
+  all('All', 'Everything that needs a decision'),
+  interviews('Interviews', 'Confirmed interview events'),
+  offers('Offers', 'Offer letters and onboarding'),
+  assessments('Assessments', 'Tests and take-home tasks'),
+  needsReview('Needs review', 'Ambiguous wording, never notified'),
+  recruiter('Recruiter', 'Outreach and acknowledgements');
 
-  const InboxFilter(this.label);
+  const InboxFilter(this.label, this.description);
 
   final String label;
+  final String description;
 }
 
 /// Single mutable source of truth for the UI.
@@ -35,8 +37,10 @@ class AppState extends ChangeNotifier {
   String? _email;
   List<MailItem> _items = const <MailItem>[];
   Map<MailVerdict, int> _counts = const <MailVerdict, int>{};
+  Map<MailCategory, int> _categoryCounts = const <MailCategory, int>{};
   InboxFilter _filter = InboxFilter.all;
   bool _showEverything = false;
+  String _query = '';
   int _pollMinutes = SettingsStore.defaultPollMinutes;
   int _fetchCount = SettingsStore.defaultFetchCount;
   bool _notificationsEnabled = true;
@@ -45,6 +49,7 @@ class AppState extends ChangeNotifier {
   DateTime? _lastSync;
   String? _lastError;
   String? _flash;
+  MailItem? _pendingOpen;
 
   bool get booting => _booting;
   bool get syncing => _syncing;
@@ -52,9 +57,22 @@ class AppState extends ChangeNotifier {
   String? get email => _email;
   List<MailItem> get items => _items;
   InboxFilter get filter => _filter;
+  String get query => _query;
 
   int get flaggedCount => _counts[MailVerdict.notify] ?? 0;
   int get reviewCount => _counts[MailVerdict.review] ?? 0;
+  int get recruiterCount => _counts[MailVerdict.informational] ?? 0;
+
+  /// Count for one filter chip, or `null` when a number would say nothing
+  /// useful (the "All" chip duplicates the list length below it).
+  int? countFor(InboxFilter filter) => switch (filter) {
+    InboxFilter.all => null,
+    InboxFilter.interviews => _categoryCounts[MailCategory.interview] ?? 0,
+    InboxFilter.offers => _categoryCounts[MailCategory.offer] ?? 0,
+    InboxFilter.assessments => _categoryCounts[MailCategory.assessment] ?? 0,
+    InboxFilter.needsReview => reviewCount,
+    InboxFilter.recruiter => recruiterCount,
+  };
 
   /// When true the list also shows ignored mail and rejections, so the user can
   /// check what the rules filtered out instead of trusting them blindly.
@@ -75,14 +93,25 @@ class AppState extends ChangeNotifier {
     return message;
   }
 
+  /// Message the user asked to open by tapping a notification. Consumed by the
+  /// list, which owns the navigator.
+  MailItem? consumePendingOpen() {
+    final item = _pendingOpen;
+    _pendingOpen = null;
+    return item;
+  }
+
   Future<void> boot() async {
     await NotificationService.init();
+    NotificationService.onMailTapped = requestOpen;
     final credentials = await CredentialsStore.read();
     _email = credentials?.email;
     await _loadSettings();
     if (credentials != null) {
       await _loadItems();
       await BackgroundScheduler.schedule(_pollMinutes);
+      final launchUid = await NotificationService.launchedFromMailUid();
+      if (launchUid != null) await requestOpen(launchUid);
     }
     _booting = false;
     notifyListeners();
@@ -104,10 +133,11 @@ class AppState extends ChangeNotifier {
     if (_showEverything) return MailVerdict.values.toSet();
     return switch (_filter) {
       InboxFilter.needsReview => const <MailVerdict>{MailVerdict.review},
+      InboxFilter.recruiter => const <MailVerdict>{MailVerdict.informational},
       InboxFilter.all => MailVerdict.listedByDefault,
       InboxFilter.offers ||
       InboxFilter.interviews ||
-      InboxFilter.assessments => const <MailVerdict>{MailVerdict.notify},
+      InboxFilter.assessments => MailVerdict.notifiable,
     };
   }
 
@@ -115,15 +145,19 @@ class AppState extends ChangeNotifier {
     InboxFilter.offers => MailCategory.offer,
     InboxFilter.interviews => MailCategory.interview,
     InboxFilter.assessments => MailCategory.assessment,
-    InboxFilter.all || InboxFilter.needsReview => null,
+    InboxFilter.all ||
+    InboxFilter.needsReview ||
+    InboxFilter.recruiter => null,
   };
 
   Future<void> _loadItems() async {
     _items = await MailDatabase.list(
       verdicts: _visibleVerdicts,
       category: _visibleCategory,
+      query: _query,
     );
     _counts = await MailDatabase.countsByVerdict();
+    _categoryCounts = await MailDatabase.countsByCategory();
   }
 
   /// Verifies the credentials against Gmail before storing them, so a typo in
@@ -160,9 +194,11 @@ class AppState extends ChangeNotifier {
     _email = null;
     _items = const <MailItem>[];
     _counts = const <MailVerdict, int>{};
+    _categoryCounts = const <MailCategory, int>{};
     _rules = RuleSet.defaults;
     _filter = InboxFilter.all;
     _showEverything = false;
+    _query = '';
     _pollMinutes = SettingsStore.defaultPollMinutes;
     _fetchCount = SettingsStore.defaultFetchCount;
     _notificationsEnabled = true;
@@ -183,16 +219,7 @@ class AppState extends ChangeNotifier {
       // background run would notify about mail already read.
       final pending = await MailDatabase.pendingNotifications();
       await MailDatabase.markNotified(pending.map((MailItem item) => item.uid));
-      _flash = switch (result) {
-        SyncResult(added: 0) => 'No new mail.',
-        SyncResult(flagged: 0, needsReview: 0) =>
-          '${result.added} new, nothing important.',
-        SyncResult(needsReview: 0) =>
-          '${result.added} new · ${result.flagged} flagged.',
-        _ =>
-          '${result.added} new · ${result.flagged} flagged · '
-              '${result.needsReview} to review.',
-      };
+      _flash = _describe(result);
     } else {
       _flash = result.error;
     }
@@ -203,6 +230,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  static String _describe(SyncResult result) {
+    if (result.added == 0) return 'No new mail.';
+    final parts = <String>['${result.added} new'];
+    if (result.flagged > 0) parts.add('${result.flagged} flagged');
+    if (result.needsReview > 0) parts.add('${result.needsReview} to review');
+    if (result.recruiter > 0) parts.add('${result.recruiter} recruiter');
+    if (parts.length == 1) parts.add('nothing important');
+    final summary = parts.join(' · ');
+    return result.backlog > 0
+        ? '$summary — ${result.backlog} more waiting for the next sync.'
+        : summary;
+  }
+
   Future<void> setFilter(InboxFilter filter) async {
     _filter = filter;
     await _loadItems();
@@ -211,6 +251,13 @@ class AppState extends ChangeNotifier {
 
   Future<void> setShowEverything(bool value) async {
     _showEverything = value;
+    await _loadItems();
+    notifyListeners();
+  }
+
+  Future<void> setQuery(String query) async {
+    if (query == _query) return;
+    _query = query;
     await _loadItems();
     notifyListeners();
   }
@@ -228,6 +275,22 @@ class AppState extends ChangeNotifier {
   Future<void> archive(int uid) async {
     await MailDatabase.setArchived(uid: uid, archived: true);
     await _loadItems();
+    notifyListeners();
+  }
+
+  /// Undo for a swipe. The row is still in the table, so this is a flag flip
+  /// rather than a re-fetch.
+  Future<void> unarchive(int uid) async {
+    await MailDatabase.setArchived(uid: uid, archived: false);
+    await _loadItems();
+    notifyListeners();
+  }
+
+  /// Loads the message behind a tapped notification so the list can open it.
+  Future<void> requestOpen(int uid) async {
+    final item = await MailDatabase.byUid(uid);
+    if (item == null) return;
+    _pendingOpen = item;
     notifyListeners();
   }
 
@@ -271,4 +334,13 @@ class AppState extends ChangeNotifier {
   }
 
   Future<int> resetRules() => updateRules(RuleSet.defaults);
+
+  /// Re-reads the whole inbox window on the next sync. The escape hatch for
+  /// "the app has missed something": it drops the UID cursor so the newest
+  /// [fetchCount] messages are classified again by the current rules.
+  Future<void> rescanInbox() async {
+    await SettingsStore.clearSyncCursor();
+    await SyncService.reclassifyCached();
+    await sync();
+  }
 }

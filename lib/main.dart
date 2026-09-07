@@ -4,6 +4,7 @@ import 'services/background.dart';
 import 'state/app_state.dart';
 import 'ui/home_screen.dart';
 import 'ui/login_screen.dart';
+import 'ui/theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,17 +18,8 @@ class InboxTriageApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
     title: 'Important Mail',
     debugShowCheckedModeBanner: false,
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A73E8)),
-      useMaterial3: true,
-    ),
-    darkTheme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF1A73E8),
-        brightness: Brightness.dark,
-      ),
-      useMaterial3: true,
-    ),
+    theme: AppTheme.light(),
+    darkTheme: AppTheme.dark(),
     home: const _Boot(),
   );
 }
@@ -57,9 +49,7 @@ class _BootState extends State<_Boot> {
         return _StartupError(error: snapshot.error!);
       }
       if (snapshot.connectionState != ConnectionState.done) {
-        return const Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        );
+        return const Scaffold(body: _Splash());
       }
       return ListenableBuilder(
         listenable: appState,
@@ -68,6 +58,33 @@ class _BootState extends State<_Boot> {
       );
     },
   );
+}
+
+class _Splash extends StatelessWidget {
+  const _Splash();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(
+            Icons.mark_email_unread_outlined,
+            size: 40,
+            color: theme.colorScheme.primary,
+          ),
+          const SizedBox(height: 20),
+          const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _StartupError extends StatelessWidget {
@@ -84,7 +101,10 @@ class _StartupError extends StatelessWidget {
         children: <Widget>[
           const Icon(Icons.error_outline, size: 48),
           const SizedBox(height: 16),
-          const Text('The app failed to start.'),
+          Text(
+            'The app failed to start.',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
           const SizedBox(height: 8),
           Text('$error', textAlign: TextAlign.center),
         ],

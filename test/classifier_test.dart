@@ -90,6 +90,24 @@ void main() {
       );
       expect(result.verdict, MailVerdict.notify);
     });
+
+    test('every interview and assessment phrase clears the notify bar', () {
+      // Any anchor phrase that scored below the threshold would be dead
+      // weight in the list, so this holds the two lists to their promise.
+      for (final group in <String>[
+        RuleGroupId.interview,
+        RuleGroupId.assessment,
+      ]) {
+        for (final phrase in RuleSet.defaults.groups[group]!) {
+          final result = run(subject: phrase);
+          expect(
+            result.verdict,
+            MailVerdict.notify,
+            reason: '$group phrase "$phrase" did not notify',
+          );
+        }
+      }
+    });
   });
 
   group('notifies on decisive offer wording', () {
@@ -134,6 +152,46 @@ void main() {
       expect(result.verdict, MailVerdict.notify);
       expect(result.category, MailCategory.offer);
     });
+
+    test('an appointment letter notifies even with no other signal', () {
+      final result = run(
+        subject: 'Appointment letter',
+        body: 'Please find it attached.',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.offer);
+    });
+
+    test('an offer letter buried in the body of a plain mail notifies', () {
+      final result = run(
+        subject: 'Acme',
+        body: 'Your offer letter is attached. Your joining date is 1 October.',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.offer);
+    });
+
+    test('onboarding paperwork counts as an offer', () {
+      final result = run(
+        subject: 'Onboarding details for your joining',
+        body: 'Background verification starts next week.',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.offer);
+    });
+
+    test('every offer phrase on its own clears the notify bar', () {
+      // The user-facing promise is that an offer is never missed, so no single
+      // offer phrase may score below the threshold when it lands in a subject.
+      for (final phrase in RuleSet.defaults.groups[RuleGroupId.offer]!) {
+        final result = run(subject: phrase);
+        expect(
+          result.verdict,
+          MailVerdict.notify,
+          reason: 'offer phrase "$phrase" did not notify',
+        );
+      }
+    });
   });
 
   group('notifies on assessments', () {
@@ -160,8 +218,8 @@ void main() {
     });
   });
 
-  group('ignores recruiter noise', () {
-    test('automated application acknowledgement is ignored', () {
+  group('recruiter mail is listed but never notified', () {
+    test('automated application acknowledgement', () {
       // This is the case the anchor requirement exists for. Under a purely
       // additive score it reached the threshold and notified.
       final result = run(
@@ -170,17 +228,36 @@ void main() {
             'position and be in touch.',
         from: 'no-reply@greenhouse.io',
       );
-      expect(result.verdict, MailVerdict.ignore);
+      expect(result.verdict, MailVerdict.informational);
+      expect(result.category, MailCategory.recruiter);
+      expect(result.shouldNotify, isFalse);
       expect(result.score, greaterThan(RuleSet.defaults.reviewThreshold));
     });
 
-    test('cold outreach about a job opportunity is ignored', () {
+    test('cold outreach about a job opportunity is not an interview call', () {
       final result = run(
         subject: 'Exciting job opportunity at Acme',
         body: 'I am a recruiter and saw your profile. Great salary on offer.',
         from: 'talent@acme.com',
       );
-      expect(result.verdict, MailVerdict.ignore);
+      expect(result.verdict, MailVerdict.informational);
+      expect(result.category, MailCategory.recruiter);
+    });
+
+    test('outreach cannot buy its way in with scheduling wording', () {
+      // The exact failure this tier exists for: three ambiguous signals and a
+      // hiring-platform sender used to add up to a notification about a mail
+      // containing no interview and no offer.
+      final result = run(
+        subject: 'Job opportunity at Acme — next steps',
+        body: 'We would like to invite you to hear about this open position. '
+            'Let me know your availability and pick a time that suits. '
+            'Salary is competitive for the role.',
+        from: 'talent@lever.co',
+      );
+      expect(result.verdict, MailVerdict.informational);
+      expect(result.shouldNotify, isFalse);
+      expect(result.score, greaterThan(RuleSet.defaults.notifyThreshold));
     });
 
     test('weak signals cannot conspire, however many there are', () {
@@ -191,12 +268,26 @@ void main() {
             'were received. Job description attached. Requisition 12345.',
         from: 'jobs@linkedin.com',
       );
-      expect(result.verdict, MailVerdict.ignore);
+      expect(result.verdict, MailVerdict.informational);
+      expect(result.shouldNotify, isFalse);
+    });
+
+    test('an invitation that also mentions your application still notifies', () {
+      // Recruiter wording must not veto decisive wording, only fail to create
+      // it: real invitations routinely recap the application.
+      final result = run(
+        subject: 'Interview invitation — Acme',
+        body: 'Following your application for this position, we would like to '
+            'schedule an interview.',
+        from: 'no-reply@greenhouse.io',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.interview);
     });
 
     test('promoting the recruiter group lets those mails notify again', () {
       final rules = RuleSet.defaults.withTier(
-        'recruiter',
+        RuleGroupId.recruiter,
         RuleGroupTier.anchor,
       );
       final result = run(
@@ -206,6 +297,41 @@ void main() {
         rules: rules,
       );
       expect(result.verdict, MailVerdict.notify);
+    });
+  });
+
+  group('job alerts and marketing cannot notify', () {
+    test('a digest quoting an interview invitation is only listed', () {
+      // Job boards paste whole job descriptions into their digests, so
+      // decisive wording turns up in the body of mail addressed to nobody.
+      final result = run(
+        subject: 'Jobs for you: 12 new roles this week',
+        body: 'Backend Engineer at Acme. Apply now. The process is a '
+            'technical interview followed by an offer of employment.',
+        from: 'jobalerts@indeed.com',
+      );
+      expect(result.verdict, MailVerdict.informational);
+      expect(result.shouldNotify, isFalse);
+    });
+
+    test('the same wording in the subject line still notifies', () {
+      final result = run(
+        subject: 'Interview invitation for the Backend Engineer role',
+        body: 'Apply now to more jobs like this one.',
+        from: 'no-reply@indeed.com',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.interview);
+    });
+
+    test('an interview platform outranks digest wording in the body', () {
+      final result = run(
+        subject: 'Your task is ready',
+        body: 'Complete it today. Unsubscribe from job alerts here.',
+        from: 'no-reply@hirevue.com',
+      );
+      expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.interview);
     });
   });
 
@@ -226,18 +352,30 @@ void main() {
       expect(result.verdict, MailVerdict.review);
     });
 
-    test('two ambiguous signals plus job wording do notify', () {
-      // One vague signal is noise; two independent ones in a mail that is
-      // demonstrably about employment is a pattern.
+    test('ambiguous interview wording plus scheduling and job wording', () {
+      // "Interview with Acme" is how half of all real invitations are worded.
+      // On its own it only earns a review; a scheduling link and job wording
+      // alongside it are what make it decisive.
       final result = run(
         subject: 'Interview with Acme Corp',
         body: 'Grab a slot at https://calendly.com/acme for the Backend '
             'Engineer position.',
       );
       expect(result.verdict, MailVerdict.notify);
+      expect(result.category, MailCategory.interview);
     });
 
-    test('two ambiguous signals without job wording do not notify', () {
+    test('the same wording with no job context does not notify', () {
+      // The podcast case. The word "interview" is not evidence of hiring.
+      final result = run(
+        subject: 'Interview with the CEO of Acme',
+        body: 'Grab a slot at https://calendly.com/acme to join the live '
+            'recording.',
+      );
+      expect(result.verdict, MailVerdict.review);
+    });
+
+    test('scheduling wording alone does not notify', () {
       // The dentist case. Scheduling language is not evidence of hiring.
       final result = run(
         subject: 'Please confirm your availability',
@@ -323,7 +461,7 @@ void main() {
         subject: 'Special offer just for you',
         body: 'We would like to offer you 20% off your next purchase.',
       );
-      expect(result.verdict, isNot(MailVerdict.notify));
+      expect(result.verdict, MailVerdict.ignore);
     });
 
     test('a webinar invitation is not an interview', () {
@@ -331,7 +469,7 @@ void main() {
         subject: 'We invite you to our product webinar',
         body: 'Join us on Zoom to meet the team behind the product.',
       );
-      expect(result.verdict, isNot(MailVerdict.notify));
+      expect(result.verdict, MailVerdict.ignore);
     });
 
     test('muted sender wins over decisive wording', () {

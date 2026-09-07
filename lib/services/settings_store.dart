@@ -19,6 +19,8 @@ class SettingsStore {
   static const String _notifyKey = 'notifications_enabled';
   static const String _lastSyncKey = 'last_sync_ms';
   static const String _lastErrorKey = 'last_error';
+  static const String _lastUidKey = 'sync_last_uid';
+  static const String _uidValidityKey = 'sync_uid_validity';
 
   /// Android's WorkManager floor for periodic work. Anything smaller is
   /// silently raised to 15 by the platform.
@@ -26,9 +28,10 @@ class SettingsStore {
   static const int defaultPollMinutes = 15;
   static const int defaultFetchCount = 40;
 
-  /// How many of the newest INBOX messages each sync looks at. Small enough to
-  /// stay cheap on mobile data, large enough to survive a few missed runs.
-  static const List<int> fetchCountChoices = <int>[20, 40, 60, 100];
+  /// How many of the newest INBOX messages the *first* sync reads, before the
+  /// UID cursor exists. Later syncs read only what has arrived since, so this
+  /// is a one-off cost rather than a per-run one.
+  static const List<int> fetchCountChoices = <int>[20, 40, 60, 100, 200];
   static const List<int> pollMinuteChoices = <int>[15, 30, 60, 180, 360];
 
   static Future<SharedPreferences> _prefs() async {
@@ -103,6 +106,41 @@ class SettingsStore {
     }
   }
 
+  /// Where the last sync got to in the INBOX.
+  ///
+  /// [SyncCursor.uidValidity] is stored alongside the UID because a UID only
+  /// means anything within one incarnation of a mailbox. If Gmail ever changes
+  /// UIDVALIDITY, the cursor has to be thrown away rather than trusted.
+  static Future<SyncCursor> readSyncCursor() async {
+    final prefs = await _prefs();
+    return SyncCursor(
+      lastUid: prefs.getInt(_lastUidKey),
+      uidValidity: prefs.getInt(_uidValidityKey),
+    );
+  }
+
+  static Future<void> writeSyncCursor(SyncCursor cursor) async {
+    final prefs = await _prefs();
+    final uid = cursor.lastUid;
+    final validity = cursor.uidValidity;
+    if (uid == null) {
+      await prefs.remove(_lastUidKey);
+    } else {
+      await prefs.setInt(_lastUidKey, uid);
+    }
+    if (validity == null) {
+      await prefs.remove(_uidValidityKey);
+    } else {
+      await prefs.setInt(_uidValidityKey, validity);
+    }
+  }
+
+  static Future<void> clearSyncCursor() async {
+    final prefs = await _prefs();
+    await prefs.remove(_lastUidKey);
+    await prefs.remove(_uidValidityKey);
+  }
+
   static Future<void> clearAll() async {
     final prefs = await _prefs();
     for (final key in <String>[
@@ -112,8 +150,25 @@ class SettingsStore {
       _notifyKey,
       _lastSyncKey,
       _lastErrorKey,
+      _lastUidKey,
+      _uidValidityKey,
     ]) {
       await prefs.remove(key);
     }
   }
+}
+
+/// How far the INBOX has been read.
+class SyncCursor {
+  const SyncCursor({required this.lastUid, required this.uidValidity});
+
+  static const SyncCursor none = SyncCursor(lastUid: null, uidValidity: null);
+
+  /// Highest INBOX UID already classified and stored.
+  final int? lastUid;
+
+  /// UIDVALIDITY of the mailbox [lastUid] belongs to.
+  final int? uidValidity;
+
+  bool get isSet => lastUid != null && uidValidity != null;
 }

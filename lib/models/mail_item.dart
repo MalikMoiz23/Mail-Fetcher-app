@@ -1,9 +1,9 @@
 /// What the app should DO about a message, as distinct from what the message
 /// is about (see [MailCategory]).
 ///
-/// The three live tiers exist because precision and completeness pull in
-/// opposite directions: notifications must be trustworthy, but a vaguely worded
-/// real invitation must not vanish silently either.
+/// The tiers exist because precision and completeness pull in opposite
+/// directions: notifications must be trustworthy, but a vaguely worded real
+/// invitation must not vanish silently either.
 enum MailVerdict {
   /// Decisive wording found. Listed and pushed as a notification.
   notify('Flagged'),
@@ -12,6 +12,11 @@ enum MailVerdict {
   /// decisive interview or offer wording. Listed under "Needs review" so it can
   /// be checked deliberately, never notified.
   review('Needs review'),
+
+  /// Demonstrably about employment, but nothing is being asked of the reader:
+  /// cold outreach, "we received your application", job-alert digests. Listed
+  /// under its own filter and structurally incapable of notifying.
+  informational('Recruiter'),
 
   /// Nothing meaningful matched. Only visible via "Show everything".
   ignore('Ignored'),
@@ -28,8 +33,13 @@ enum MailVerdict {
     orElse: () => MailVerdict.ignore,
   );
 
-  /// Verdicts that appear in the default list.
+  /// Verdicts that appear in the default list. Recruiter mail is excluded on
+  /// purpose: it is high volume and needs no decision, so it lives behind its
+  /// own filter instead of diluting the list that matters.
   static const Set<MailVerdict> listedByDefault = <MailVerdict>{notify, review};
+
+  /// The only verdict that may ever reach the notification shade.
+  static const Set<MailVerdict> notifiable = <MailVerdict>{notify};
 }
 
 /// What a message is about.
@@ -53,6 +63,14 @@ enum MailCategory {
     (category) => category.name == name,
     orElse: () => MailCategory.other,
   );
+
+  /// Categories that describe something the reader has to act on, and which
+  /// therefore may notify. Recruiter outreach is deliberately absent.
+  static const Set<MailCategory> actionable = <MailCategory>{
+    offer,
+    interview,
+    assessment,
+  };
 }
 
 /// A fetched message plus the verdict the classifier reached about it.
@@ -94,7 +112,8 @@ class MailItem {
   );
 
   /// IMAP UID within the INBOX. Stable for the lifetime of the mailbox, which
-  /// is what makes it usable as the primary key and as the notification id.
+  /// is what makes it usable as the primary key, as the notification id and as
+  /// the sync cursor.
   final int uid;
 
   /// RFC 822 Message-ID, used to build a Gmail deep link. Empty if absent.
@@ -125,7 +144,7 @@ class MailItem {
   /// leaves such rows alone.
   final bool userOverride;
 
-  bool get shouldNotify => verdict == MailVerdict.notify;
+  bool get shouldNotify => MailVerdict.notifiable.contains(verdict);
 
   /// Notification ids must fit in a signed 32-bit int on Android.
   int get notificationId => uid % 2147483647;
@@ -136,6 +155,7 @@ class MailItem {
   /// worth naming, so the verdict is the more informative of the two.
   String get displayLabel => switch (verdict) {
     MailVerdict.review => MailVerdict.review.label,
+    MailVerdict.informational => MailCategory.recruiter.label,
     MailVerdict.rejected => MailCategory.rejection.label,
     _ => category.label,
   };
@@ -148,6 +168,10 @@ class MailItem {
   }
 
   static const int snippetLength = 300;
+
+  /// Lower-cased text the in-app search runs against.
+  String get searchHaystack =>
+      '$subject $fromName $fromEmail $body'.toLowerCase();
 
   /// Gmail web/app deep link that resolves the exact message, or `null` when
   /// the server gave us no Message-ID.

@@ -13,7 +13,10 @@ class SyncResult {
     this.added = 0,
     this.flagged = 0,
     this.needsReview = 0,
+    this.recruiter = 0,
     this.notified = 0,
+    this.backlog = 0,
+    this.baseline = false,
     this.error,
     this.notConfigured = false,
   });
@@ -27,7 +30,19 @@ class SyncResult {
   /// New mail listed for review but not notified.
   final int needsReview;
 
+  /// New mail filed under "Recruiter".
+  final int recruiter;
+
   final int notified;
+
+  /// New messages the server had that this run did not get to, because of the
+  /// per-run cap. They are picked up by the next run rather than lost.
+  final int backlog;
+
+  /// True when this pass had to read the newest messages instead of only what
+  /// arrived since the last run.
+  final bool baseline;
+
   final String? error;
 
   /// No credentials stored yet, so there was nothing to do. Distinct from an
@@ -49,6 +64,12 @@ class SyncService {
   /// site for why a cap exists.
   static const int maxNotificationsPerRun = 10;
 
+  /// Most messages one incremental run will classify. A backlog larger than
+  /// this is worked through oldest-first over consecutive runs, so a phone
+  /// that was offline for a week never has to do it all in one 10-minute
+  /// WorkManager slot.
+  static const int maxNewPerRun = 60;
+
   static Future<SyncResult> run({required bool allowNotifications}) async {
     try {
       final credentials = await CredentialsStore.read();
@@ -57,18 +78,30 @@ class SyncService {
       }
 
       final rules = await SettingsStore.readRules();
-      final fetchCount = await SettingsStore.readFetchCount();
+      final baselineCount = await SettingsStore.readFetchCount();
       final classifier = Classifier(rules);
 
-      final messages = await ImapService.fetchRecent(
+      // A stored cursor is only trustworthy while the cache it describes still
+      // exists. After a schema rebuild or a wipe the table is empty, and
+      // trusting the cursor would leave the list blank until new mail happened
+      // to arrive.
+      final stored = await SettingsStore.readSyncCursor();
+      final cursor = (await MailDatabase.rowCount()) == 0
+          ? SyncCursor.none
+          : stored;
+
+      final batch = await ImapService.fetchNew(
         credentials: credentials,
-        count: fetchCount,
+        sinceUid: cursor.lastUid,
+        uidValidity: cursor.uidValidity,
+        baselineCount: baselineCount,
+        maxMessages: baselineCount > maxNewPerRun
+            ? baselineCount
+            : maxNewPerRun,
       );
 
-      final known = await MailDatabase.knownUids();
       final fresh = <MailItem>[];
-      for (final message in messages) {
-        if (known.contains(message.uid)) continue;
+      for (final message in batch.messages) {
         final verdict = classifier.classify(
           subject: message.subject,
           body: message.body,
@@ -92,6 +125,15 @@ class SyncService {
       }
       await MailDatabase.insertNew(fresh);
 
+      // Only move the cursor once the rows are committed. A crash between the
+      // two would otherwise skip the mail permanently.
+      final highest = batch.highestUid;
+      if (highest != null) {
+        await SettingsStore.writeSyncCursor(
+          SyncCursor(lastUid: highest, uidValidity: batch.uidValidity),
+        );
+      }
+
       var notified = 0;
       final notificationsOn = await SettingsStore.readNotificationsEnabled();
       if (allowNotifications && notificationsOn) {
@@ -106,6 +148,7 @@ class SyncService {
         for (final item in toShow) {
           await NotificationService.showMail(item);
         }
+        await NotificationService.showSummary(toShow);
         await MailDatabase.markNotified(
           pending.map((MailItem item) => item.uid),
         );
@@ -116,16 +159,32 @@ class SyncService {
       await SettingsStore.writeLastSync(DateTime.now());
       await SettingsStore.writeLastError(null);
 
+      var flagged = 0;
+      var review = 0;
+      var recruiter = 0;
+      for (final item in fresh) {
+        switch (item.verdict) {
+          case MailVerdict.notify:
+            flagged++;
+          case MailVerdict.review:
+            review++;
+          case MailVerdict.informational:
+            recruiter++;
+          case MailVerdict.ignore:
+          case MailVerdict.rejected:
+            break;
+        }
+      }
+
       return SyncResult(
-        fetched: messages.length,
+        fetched: batch.messages.length,
         added: fresh.length,
-        flagged: fresh
-            .where((MailItem item) => item.verdict == MailVerdict.notify)
-            .length,
-        needsReview: fresh
-            .where((MailItem item) => item.verdict == MailVerdict.review)
-            .length,
+        flagged: flagged,
+        needsReview: review,
+        recruiter: recruiter,
         notified: notified,
+        backlog: batch.totalNew - batch.messages.length,
+        baseline: batch.baseline,
       );
     } on MailAuthException catch (error) {
       await SettingsStore.writeLastError(error.message);

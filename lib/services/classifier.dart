@@ -15,7 +15,29 @@ class Classification {
   final List<String> reasons;
   final MailVerdict verdict;
 
-  bool get shouldNotify => verdict == MailVerdict.notify;
+  bool get shouldNotify => MailVerdict.notifiable.contains(verdict);
+}
+
+/// One phrase, normalised once when the rules are loaded rather than once per
+/// message. A phrase list of ~400 entries is walked for every mail, so
+/// normalising inside the hot loop dominated the cost of a sync.
+class _Phrase {
+  _Phrase(this.original, this.normalized) : spaced = ' $normalized';
+
+  final String original;
+  final String normalized;
+
+  /// The phrase with a leading space, precomputed so that matching allocates
+  /// nothing at all.
+  final String spaced;
+}
+
+class _Group {
+  const _Group(this.spec, this.tier, this.phrases);
+
+  final RuleGroupSpec spec;
+  final RuleGroupTier tier;
+  final List<_Phrase> phrases;
 }
 
 /// Rule-based importance scoring, on device.
@@ -25,12 +47,21 @@ class Classification {
 /// word "position" used to be enough to notify about an automated
 /// acknowledgement containing no interview and no offer.
 ///
-/// A notification now requires one of:
-///  * an **anchor** match — wording that can only mean an interview, an offer or
-///    an assessment; or
-///  * two distinct **support** matches together with job context — one vague
-///    signal is noise, two independent ones in a mail that is demonstrably about
-///    employment is a pattern.
+/// A notification requires **decisive** wording, which means one of:
+///  * an anchor match — wording that can only mean an interview, an offer or an
+///    assessment;
+///  * mail from a video or AI interview platform, which is an interview task by
+///    definition; or
+///  * ambiguous interview wording ("Interview with Acme") backed by both
+///    scheduling wording and job wording.
+///
+/// Three things can then take a notification away again:
+///  * rejection wording, unless offer wording overrides it;
+///  * job-alert or marketing wording, unless the decisive phrase is in the
+///    subject line — digests quote job descriptions verbatim, so their bodies
+///    contain other people's interview invitations;
+///  * recruiter wording with nothing decisive of its own, which is filed under
+///    "Recruiter" and can never notify however much it scores.
 ///
 /// Anything with weaker evidence is listed under "Needs review" instead, so a
 /// vaguely worded real invitation is never silently dropped.
@@ -38,24 +69,32 @@ class Classification {
 /// Phrase matching anchors at the start of a word only, so "interview" also
 /// catches "interviews" and "interviewing".
 class Classifier {
-  Classifier(this.rules);
+  Classifier(this.rules) : _groups = _compile(rules);
 
   final RuleSet rules;
+  final List<_Group> _groups;
 
-  final Map<String, RegExp> _cache = <String, RegExp>{};
+  static List<_Group> _compile(RuleSet rules) => <_Group>[
+    for (final spec in kRuleGroups)
+      _Group(spec, rules.tierOf(spec.id), <_Phrase>[
+        for (final phrase in rules.phrasesOf(spec.id))
+          if (normalize(phrase).isNotEmpty) _Phrase(phrase, normalize(phrase)),
+      ]),
+  ];
 
   /// Collapses everything that is not a letter or digit into single spaces so
   /// that phrases match across punctuation, line breaks and HTML leftovers.
   static String normalize(String input) =>
       input.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
 
-  RegExp _matcher(String normalizedPhrase) => _cache.putIfAbsent(
-    normalizedPhrase,
-    () => RegExp('(?<![a-z0-9])${RegExp.escape(normalizedPhrase)}'),
-  );
-
-  bool _matches(String normalizedPhrase, String haystack) =>
-      _matcher(normalizedPhrase).hasMatch(haystack);
+  /// True when [haystack] contains [phrase] at a word start.
+  ///
+  /// Both sides are normalised, so the only character that can precede a word
+  /// is a single space. That makes this equivalent to the `(?<![a-z0-9])`
+  /// regex it replaces, without compiling or running one per phrase.
+  static bool _matches(_Phrase phrase, String haystack) =>
+      haystack.startsWith(phrase.normalized) ||
+      haystack.contains(phrase.spaced);
 
   /// True when [host] equals [domain] or is a subdomain of it.
   static bool _hostMatches(String host, String domain) =>
@@ -86,64 +125,82 @@ class Classifier {
     var score = 0;
     final reasons = <String>[];
     final matchedCategories = <MailCategory>[];
+    final matchedGroups = <String>{};
 
     var anchorMatched = false;
+    var anchorInSubject = false;
     var offerAnchorMatched = false;
-    var supportMatches = 0;
     var supportMatched = false;
-    var contextMatched = false;
+    var recruiterMatched = false;
+    var digestMatched = false;
+    var decisiveSender = false;
 
-    for (final spec in kRuleGroups) {
-      final tier = rules.tierOf(spec.id);
-      final phrases = rules.groups[spec.id] ?? const <String>[];
+    for (final group in _groups) {
+      final spec = group.spec;
       var groupMatched = false;
+      var groupInSubject = false;
 
-      for (final phrase in phrases) {
-        final normalizedPhrase = normalize(phrase);
-        if (normalizedPhrase.isEmpty) continue;
-
+      for (final phrase in group.phrases) {
         // Subject hits outrank body hits: senders put the point of the mail in
         // the subject, while bodies carry boilerplate and quoted history.
-        final inSubject = _matches(normalizedPhrase, normalizedSubject);
-        final inBody = _matches(normalizedPhrase, normalizedBody);
+        final inSubject = _matches(phrase, normalizedSubject);
+        final inBody = _matches(phrase, normalizedBody);
         if (!inSubject && !inBody) continue;
 
         groupMatched = true;
-        if (tier == RuleGroupTier.support) supportMatches++;
+        groupInSubject |= inSubject;
 
+        if (spec.weight == 0) {
+          reasons.add(
+            '  "${phrase.original}" in ${inSubject ? 'subject' : 'body'} — '
+            '${spec.label}',
+          );
+          continue;
+        }
         if (inSubject) {
           final points = spec.weight * RuleSet.subjectMultiplier;
           score += points;
-          reasons.add('+$points  "$phrase" in subject — ${spec.label}');
+          reasons.add('+$points  "${phrase.original}" in subject — '
+              '${spec.label}');
         }
         if (inBody) {
           score += spec.weight;
-          reasons.add('+${spec.weight}  "$phrase" in body — ${spec.label}');
+          reasons.add('+${spec.weight}  "${phrase.original}" in body — '
+              '${spec.label}');
         }
       }
 
       if (!groupMatched) continue;
+      matchedGroups.add(spec.id);
 
-      switch (tier) {
+      switch (group.tier) {
         case RuleGroupTier.anchor:
           anchorMatched = true;
-          if (spec.id == 'offer') offerAnchorMatched = true;
+          anchorInSubject |= groupInSubject;
+          if (spec.id == RuleGroupId.offer) offerAnchorMatched = true;
         case RuleGroupTier.support:
           supportMatched = true;
+        case RuleGroupTier.informational:
+          recruiterMatched = true;
+        case RuleGroupTier.demote:
+          digestMatched = true;
         case RuleGroupTier.weak:
-          contextMatched = true;
+          break;
       }
+
       final category = spec.category;
       if (category != null) matchedCategories.add(category);
     }
 
-    // Video and AI interview platforms count as an anchor: receiving mail from
-    // one means an interview task has been assigned, whatever the wording.
+    // Video and AI interview platforms are decisive on the sender alone:
+    // receiving mail from one means an interview task has been assigned,
+    // whatever the wording.
     for (final domain in rules.interviewPlatformDomains) {
       final needle = domain.toLowerCase().trim();
       if (needle.isEmpty || !_hostMatches(host, needle)) continue;
       score += RuleSet.interviewPlatformWeight;
       anchorMatched = true;
+      decisiveSender = true;
       matchedCategories.add(MailCategory.interview);
       reasons.add(
         '+${RuleSet.interviewPlatformWeight}  sender is the interview '
@@ -156,7 +213,6 @@ class Classifier {
       final needle = domain.toLowerCase().trim();
       if (needle.isEmpty || !_hostMatches(host, needle)) continue;
       score += RuleSet.senderDomainWeight;
-      contextMatched = true;
       reasons.add(
         '+${RuleSet.senderDomainWeight}  sender domain "$needle" is a hiring '
         'platform',
@@ -168,8 +224,9 @@ class Classifier {
     for (final phrase in rules.rejectionPhrases) {
       final normalizedPhrase = normalize(phrase);
       if (normalizedPhrase.isEmpty) continue;
-      if (_matches(normalizedPhrase, normalizedSubject) ||
-          _matches(normalizedPhrase, normalizedBody)) {
+      final compiled = _Phrase(phrase, normalizedPhrase);
+      if (_matches(compiled, normalizedSubject) ||
+          _matches(compiled, normalizedBody)) {
         rejectionHits.add(phrase);
       }
     }
@@ -189,6 +246,24 @@ class Classifier {
       );
     }
 
+    // "Interview with Acme" is how half of all real invitations are worded, and
+    // also how a podcast newsletter is worded. Scheduling wording plus job
+    // wording is what separates the two.
+    final promotedInterview =
+        matchedGroups.contains(RuleGroupId.interviewWord) &&
+        rules.tierOf(RuleGroupId.interviewWord) == RuleGroupTier.support &&
+        matchedGroups.contains(RuleGroupId.context) &&
+        (matchedGroups.contains(RuleGroupId.scheduling) ||
+            matchedGroups.contains(RuleGroupId.personal));
+
+    final decisive = anchorMatched || promotedInterview;
+
+    // Digests quote whole job descriptions, so decisive wording turns up in
+    // their bodies. Only a decisive phrase in the subject line survives — or a
+    // decisive sender, which no digest can fake.
+    final blockedByDigest =
+        digestMatched && !anchorInSubject && !decisiveSender;
+
     matchedCategories.sort(
       (MailCategory a, MailCategory b) => b.priority.compareTo(a.priority),
     );
@@ -196,15 +271,17 @@ class Classifier {
         ? MailCategory.other
         : matchedCategories.first;
 
-    final promotedBySupport =
-        supportMatches >= RuleSet.supportMatchesForNotify && contextMatched;
-
-    if (anchorMatched) {
-      reasons.add('Decisive wording found (an anchor phrase matched).');
-    } else if (promotedBySupport) {
+    if (decisive) {
       reasons.add(
-        '$supportMatches separate ambiguous signals plus job wording — treated '
-        'as decisive.',
+        anchorMatched
+            ? 'Decisive wording found (an anchor phrase matched).'
+            : 'Decisive by promotion: ambiguous interview wording plus '
+                  'scheduling and job wording.',
+      );
+    } else if (recruiterMatched) {
+      reasons.add(
+        'Recruiter wording only — nothing is being asked of you, so this is '
+        'filed under "Recruiter" and cannot notify.',
       );
     } else if (supportMatched) {
       reasons.add(
@@ -215,29 +292,64 @@ class Classifier {
       reasons.add('No decisive or ambiguous wording matched.');
     }
 
-    final MailVerdict verdict;
-    if ((anchorMatched || promotedBySupport) &&
-        score >= rules.notifyThreshold) {
-      verdict = MailVerdict.notify;
+    if (decisive && blockedByDigest) {
       reasons.add(
-        'Score $score >= notify threshold ${rules.notifyThreshold} → notify',
+        'Job-alert or marketing wording matched and the decisive phrase was '
+        'not in the subject line, so the notification is blocked.',
       );
-    } else if ((anchorMatched || supportMatched) &&
-        score >= rules.reviewThreshold) {
+    }
+
+    final MailVerdict verdict;
+    if (decisive && !blockedByDigest) {
+      if (score >= rules.notifyThreshold) {
+        verdict = MailVerdict.notify;
+        reasons.add(
+          'Score $score >= notify threshold ${rules.notifyThreshold} → notify',
+        );
+      } else if (score >= rules.reviewThreshold) {
+        verdict = MailVerdict.review;
+        reasons.add(
+          'Score $score >= review threshold ${rules.reviewThreshold} but short '
+          'of the notify bar → needs review',
+        );
+      } else {
+        verdict = MailVerdict.ignore;
+        reasons.add(
+          'Score $score < review threshold ${rules.reviewThreshold} → ignored',
+        );
+      }
+    } else if (recruiterMatched) {
+      verdict = MailVerdict.informational;
+      reasons.add('Filed under "Recruiter". Listed, never notified.');
+    } else if (blockedByDigest) {
+      // A digest about jobs is worth listing; a marketing mail that happens to
+      // say "would like to offer" is not worth even a review.
+      verdict = matchedGroups.contains(RuleGroupId.context)
+          ? MailVerdict.informational
+          : MailVerdict.ignore;
+      reasons.add(
+        verdict == MailVerdict.informational
+            ? 'Filed under "Recruiter" as a job digest. Listed, never '
+                  'notified.'
+            : 'Marketing wording with no job wording → ignored.',
+      );
+    } else if (supportMatched && score >= rules.reviewThreshold) {
       verdict = MailVerdict.review;
       reasons.add(
-        'Score $score >= review threshold ${rules.reviewThreshold} but short of '
-        'the notify bar → needs review',
+        'Score $score >= review threshold ${rules.reviewThreshold} → needs '
+        'review',
       );
     } else {
       verdict = MailVerdict.ignore;
       reasons.add(
-        'Score $score < review threshold ${rules.reviewThreshold} → ignored',
+        'Nothing decisive and score $score below the review bar → ignored',
       );
     }
 
     return Classification(
-      category: category,
+      category: verdict == MailVerdict.informational
+          ? MailCategory.recruiter
+          : category,
       score: score,
       reasons: reasons,
       verdict: verdict,

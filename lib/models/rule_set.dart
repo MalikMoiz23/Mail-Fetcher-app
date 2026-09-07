@@ -2,21 +2,35 @@ import 'mail_item.dart';
 
 /// How much authority a group of phrases carries.
 ///
-/// This tiering is what makes the engine precise. Before it existed, score
-/// simply accumulated, so five weak signals ("your application", a greenhouse.io
-/// sender, the word "position") could flag an automated acknowledgement that
-/// contained no interview and no offer. Now only decisive wording can raise a
-/// notification.
+/// This tiering is what makes the engine precise. A plain sum lets weak signals
+/// conspire: "your application" plus a greenhouse.io sender plus the word
+/// "position" once added up to a notification about an automated
+/// acknowledgement containing no interview and no offer.
 enum RuleGroupTier {
   /// Decisive. One match is enough to notify, given the score threshold.
   anchor('Can notify', 'One match is enough to raise a notification.'),
 
   /// Suggestive but ambiguous — a scheduling link, "your availability". Lists
-  /// the mail under "Needs review". Two of these plus job context can notify.
+  /// the mail under "Needs review" and never notifies on its own.
   support(
     'Review only',
-    'Lists the mail under "Needs review" without notifying. Two separate '
-        'matches plus job wording can still notify.',
+    'Lists the mail under "Needs review" without ever notifying.',
+  ),
+
+  /// Proves the mail is about employment but asks nothing of the reader: cold
+  /// outreach, application acknowledgements. Files the mail under "Recruiter".
+  informational(
+    'Recruiter list only',
+    'Files the mail under "Recruiter". It can never notify, whatever else '
+        'matches alongside it.',
+  ),
+
+  /// Marketing and job-alert digests. Blocks a notification outright unless
+  /// decisive wording appears in the subject line.
+  demote(
+    'Blocks notifications',
+    'Job alerts, digests and marketing. Blocks a notification unless decisive '
+        'wording appears in the subject line itself.',
   ),
 
   /// Contributes score and nothing else. Never lists or notifies on its own.
@@ -32,6 +46,22 @@ enum RuleGroupTier {
         (tier) => tier.name == name,
         orElse: () => fallback,
       );
+}
+
+/// Stable ids of the shipped groups. The classifier needs to name a few of them
+/// directly, and a typo in a string literal there would fail silently.
+class RuleGroupId {
+  const RuleGroupId._();
+
+  static const String offer = 'offer';
+  static const String interview = 'interview';
+  static const String assessment = 'assessment';
+  static const String interviewWord = 'interviewWord';
+  static const String scheduling = 'scheduling';
+  static const String personal = 'personal';
+  static const String recruiter = 'recruiter';
+  static const String context = 'context';
+  static const String digest = 'digest';
 }
 
 /// Describes one weighted group of phrases in the rule engine.
@@ -60,58 +90,101 @@ class RuleGroupSpec {
 /// The scoring groups, strongest first.
 const List<RuleGroupSpec> kRuleGroups = <RuleGroupSpec>[
   RuleGroupSpec(
-    id: 'offer',
-    label: 'Offer',
+    id: RuleGroupId.offer,
+    label: 'Offer letter',
     weight: 10,
     category: MailCategory.offer,
     defaultTier: RuleGroupTier.anchor,
-    hint: 'Explicit offer wording. Also overrides rejection phrases, because '
-        'offer mails routinely recap the process.',
+    hint:
+        'Explicit offer and onboarding wording. Also overrides rejection '
+        'phrases, because offer mails routinely recap the process.',
   ),
   RuleGroupSpec(
-    id: 'interview',
-    label: 'Interview',
+    id: RuleGroupId.interview,
+    label: 'Interview invitation',
     weight: 10,
     category: MailCategory.interview,
     defaultTier: RuleGroupTier.anchor,
-    hint: 'Unambiguous interview events: invitations, confirmations, '
-        'reschedules, named rounds, AI and video interviews.',
+    hint:
+        'Wording that can only describe an actual interview event: '
+        'invitations, confirmations, reschedules, named rounds, AI and video '
+        'interviews.',
   ),
   RuleGroupSpec(
-    id: 'assessment',
-    label: 'Assessment',
+    id: RuleGroupId.assessment,
+    label: 'Assessment or test',
     weight: 10,
     category: MailCategory.assessment,
     defaultTier: RuleGroupTier.anchor,
-    hint: 'Coding tests and take-home assignments, which carry deadlines. '
-        'Named platforms are included.',
+    hint:
+        'Coding tests and take-home assignments, which carry deadlines. Named '
+        'platforms are included.',
   ),
   RuleGroupSpec(
-    id: 'scheduling',
-    label: 'Scheduling and ambiguous wording',
+    id: RuleGroupId.interviewWord,
+    label: 'Ambiguous interview wording',
+    weight: 4,
+    category: MailCategory.interview,
+    defaultTier: RuleGroupTier.support,
+    hint:
+        'The word "interview" without an event around it. A podcast '
+        'newsletter says "interview with the CEO"; so does a real invitation '
+        'titled "Interview with Acme". On its own this only earns a review — '
+        'it is promoted to a notification when scheduling wording and job '
+        'wording appear alongside it.',
+  ),
+  RuleGroupSpec(
+    id: RuleGroupId.scheduling,
+    label: 'Scheduling wording',
     weight: 4,
     category: null,
     defaultTier: RuleGroupTier.support,
-    hint: 'Real invites are sometimes worded this vaguely, and so is a dentist '
+    hint:
+        'Real invites are sometimes worded this vaguely, and so is a dentist '
         'appointment. Listed for review rather than notified.',
   ),
   RuleGroupSpec(
-    id: 'recruiter',
-    label: 'Recruiter and acknowledgements',
+    id: RuleGroupId.recruiter,
+    label: 'Recruiter outreach',
     weight: 3,
     category: MailCategory.recruiter,
-    defaultTier: RuleGroupTier.weak,
-    hint: 'Cold outreach and automated "we received your application" mail. '
-        'Highest volume, no deadline, so it scores but never flags.',
+    defaultTier: RuleGroupTier.informational,
+    hint:
+        'Cold outreach, "job opportunity" mail and automated "we received '
+        'your application" acknowledgements. Highest volume, nothing to do '
+        'about it, so it is filed under "Recruiter" and can never notify.',
   ),
   RuleGroupSpec(
-    id: 'context',
+    id: RuleGroupId.personal,
+    label: 'Addressed to you as a candidate',
+    weight: 2,
+    category: null,
+    defaultTier: RuleGroupTier.weak,
+    hint:
+        'Second-person wording that proves the mail concerns the reader\'s own '
+        'application rather than reporting on hiring in general.',
+  ),
+  RuleGroupSpec(
+    id: RuleGroupId.context,
     label: 'Job context',
     weight: 1,
     category: null,
     defaultTier: RuleGroupTier.weak,
-    hint: 'Weak hints that the mail is about employment at all. Required '
-        'before two ambiguous scheduling signals may notify.',
+    hint:
+        'Weak hints that the mail is about employment at all. Required before '
+        'ambiguous interview wording may be promoted.',
+  ),
+  RuleGroupSpec(
+    id: RuleGroupId.digest,
+    label: 'Job alerts and marketing',
+    weight: 0,
+    category: MailCategory.recruiter,
+    defaultTier: RuleGroupTier.demote,
+    hint:
+        'Job-board digests, "apply now" blasts and promotional mail. These '
+        'quote job descriptions verbatim, so decisive wording turns up in '
+        'their bodies. A match blocks the notification unless the decisive '
+        'wording is in the subject line.',
   ),
 ];
 
@@ -188,7 +261,7 @@ class RuleSet {
   final List<String> rejectionPhrases;
 
   /// Video and AI interview platforms. Mail from these hosts is an interview
-  /// task by definition, so a match here counts as an anchor.
+  /// task by definition, so a match here counts as decisive.
   ///
   /// Matched on the sender's host rather than on body text because the product
   /// names are not safe as phrases — "willo" is inside "willow", "karat" is
@@ -203,7 +276,7 @@ class RuleSet {
   /// score. The escape hatch for job-alert digests.
   final List<String> mutedSenders;
 
-  /// Score needed to notify, on top of the anchor requirement.
+  /// Score needed to notify, on top of the decisive-wording requirement.
   final int notifyThreshold;
 
   /// Score needed to appear under "Needs review".
@@ -212,13 +285,10 @@ class RuleSet {
   static const int interviewPlatformWeight = 10;
   static const int senderDomainWeight = 3;
 
-  /// Weight multiplier applied to matches found in the subject line.
+  /// Weight multiplier applied to matches found in the subject line. Senders
+  /// put the point of the mail in the subject; bodies carry boilerplate,
+  /// quoted history and, in a digest, other people's job descriptions.
   static const int subjectMultiplier = 2;
-
-  /// Distinct support-tier matches that, together with job context, are treated
-  /// as equivalent to one anchor. One vague signal is noise; two independent
-  /// ones plus job wording is a pattern.
-  static const int supportMatchesForNotify = 2;
 
   RuleGroupTier tierOf(String groupId) =>
       tiers[groupId] ??
@@ -229,31 +299,44 @@ class RuleSet {
           )
           .defaultTier;
 
+  List<String> phrasesOf(String groupId) =>
+      groups[groupId] ?? const <String>[];
+
   static const RuleSet defaults = RuleSet(
     notifyThreshold: 10,
     reviewThreshold: 4,
     tiers: <String, RuleGroupTier>{
-      'offer': RuleGroupTier.anchor,
-      'interview': RuleGroupTier.anchor,
-      'assessment': RuleGroupTier.anchor,
-      'scheduling': RuleGroupTier.support,
-      'recruiter': RuleGroupTier.weak,
-      'context': RuleGroupTier.weak,
+      RuleGroupId.offer: RuleGroupTier.anchor,
+      RuleGroupId.interview: RuleGroupTier.anchor,
+      RuleGroupId.assessment: RuleGroupTier.anchor,
+      RuleGroupId.interviewWord: RuleGroupTier.support,
+      RuleGroupId.scheduling: RuleGroupTier.support,
+      RuleGroupId.recruiter: RuleGroupTier.informational,
+      RuleGroupId.personal: RuleGroupTier.weak,
+      RuleGroupId.context: RuleGroupTier.weak,
+      RuleGroupId.digest: RuleGroupTier.demote,
     },
     groups: <String, List<String>>{
       // Explicit offer language only. Generic constructions such as "would
       // like to offer" live in the scheduling group instead, because marketing
       // mail uses them for discounts.
-      'offer': <String>[
+      RuleGroupId.offer: <String>[
         'offer letter',
         'letter of offer',
         'job offer',
         'offer of employment',
+        'offer of appointment',
         'employment offer',
         'formal offer',
         'verbal offer',
         'written offer',
         'offer details',
+        'offer is attached',
+        'attached offer',
+        'signed offer',
+        'offer acceptance',
+        'accept our offer',
+        'accept the offer',
         'excited to offer',
         'excited to extend',
         'pleased to offer',
@@ -264,11 +347,14 @@ class RuleSet {
         'extend an offer',
         'extending an offer',
         'extended an offer',
-        'accept our offer',
-        'accept the offer',
         'appointment letter',
         'letter of appointment',
         'letter of intent',
+        'joining letter',
+        'employment contract',
+        'contract of employment',
+        'employment agreement',
+        'confirmation of employment',
         'you have been selected for the position',
         'congratulations you have been selected',
         'welcome aboard',
@@ -280,10 +366,10 @@ class RuleSet {
         'pre onboarding',
         'background verification',
       ],
-      // Decisive interview events. Bare "interview" is deliberately absent:
-      // it appears in newsletters, podcasts and rejection mail. Constructions
+      // Decisive interview events. Bare "interview" is deliberately absent: it
+      // appears in newsletters, podcasts and rejection mail. Constructions
       // that name an actual event are listed instead.
-      'interview': <String>[
+      RuleGroupId.interview: <String>[
         'interview invitation',
         'invitation to interview',
         'invitation for interview',
@@ -301,6 +387,8 @@ class RuleSet {
         'schedule your interview',
         'scheduling your interview',
         'scheduling an interview',
+        'set up an interview',
+        'arrange an interview',
         'book your interview',
         'confirm your interview',
         'interview confirmation',
@@ -308,8 +396,13 @@ class RuleSet {
         'interview details',
         'interview reminder',
         'upcoming interview',
+        'attend an interview',
+        'attend the interview',
+        'available for an interview',
+        'interview availability',
         'your interview with',
         'your interview for',
+        'your interview is',
         'interview rescheduled',
         'reschedule your interview',
         'interview link',
@@ -320,10 +413,13 @@ class RuleSet {
         'on site interview',
         'in person interview',
         'technical interview',
+        'coding interview',
+        'system design interview',
         'final interview',
         'first round interview',
         'second round interview',
         'panel interview',
+        'hr interview',
         'ai interview',
         'ai powered interview',
         'ai based interview',
@@ -337,7 +433,9 @@ class RuleSet {
         'screening interview',
         'technical round',
         'hr round',
+        'managerial round',
         'final round',
+        'culture fit round',
         'you have been shortlisted',
         'shortlisted for',
         'selected for interview',
@@ -361,24 +459,30 @@ class RuleSet {
         'talently ai',
       ],
       // Bare "assessment" is absent on purpose: "risk assessment" and "self
-      // assessment" are common in unrelated mail.
-      'assessment': <String>[
+      // assessment" are common in unrelated mail. It sits in the scheduling
+      // group, which reviews rather than notifies.
+      RuleGroupId.assessment: <String>[
         'coding challenge',
         'coding test',
         'coding assessment',
         'coding assignment',
         'coding exercise',
+        'coding round',
         'technical assessment',
         'technical test',
         'online assessment',
         'online test',
         'aptitude test',
+        'aptitude round',
+        'proctored test',
+        'psychometric test',
         'skills assessment',
         'take home assignment',
         'take home test',
         'take home challenge',
         'assessment link',
         'assessment invitation',
+        'assessment deadline',
         'complete the assessment',
         'complete your assessment',
         'complete the assignment',
@@ -392,11 +496,25 @@ class RuleSet {
         'testdome',
         'devskiller',
         'coderpad',
+        'mettl',
+        'imocha',
+        'doselect',
       ],
-      'scheduling': <String>[
+      // The word "interview" without an event around it.
+      RuleGroupId.interviewWord: <String>[
         'interview with',
         'interview for',
         'interview at',
+        'interview on',
+        'interview process',
+        'interview stage',
+        'interview round',
+        'interview panel',
+        'interview slot',
+        'interview time',
+        'interviewer',
+      ],
+      RuleGroupId.scheduling: <String>[
         'your availability',
         'availability for a call',
         'available for a call',
@@ -410,6 +528,9 @@ class RuleSet {
         'book a time',
         'pick a time',
         'find a time',
+        'confirm your attendance',
+        'meeting link',
+        'join the meeting',
         'next steps',
         'invite you to',
         'meet the team',
@@ -428,11 +549,19 @@ class RuleSet {
         'zoom.us',
         'teams.microsoft.com',
       ],
-      'recruiter': <String>[
+      RuleGroupId.recruiter: <String>[
         'job opportunity',
         'career opportunity',
         'exciting opportunity',
+        'opportunity at',
         'we are hiring',
+        'hiring for',
+        'job openings',
+        'open roles',
+        'open positions',
+        'came across your profile',
+        'saw your profile',
+        'reaching out about',
         'talent acquisition',
         'hiring manager',
         'recruiter',
@@ -451,8 +580,26 @@ class RuleSet {
         'role at',
         'vacancy',
         'requisition',
+        'refer a friend',
+        'referral bonus',
       ],
-      'context': <String>[
+      RuleGroupId.personal: <String>[
+        'your candidacy',
+        'your interview',
+        'your assessment',
+        'your offer',
+        'your submission',
+        'your onboarding',
+        'your joining',
+        'your start date',
+        'your recruitment',
+        'you applied',
+        'you had applied',
+        'we received your',
+        'regarding your application',
+        'for the position you applied',
+      ],
+      RuleGroupId.context: <String>[
         'hiring',
         'recruitment',
         'candidate',
@@ -464,6 +611,42 @@ class RuleSet {
         'career',
         'job',
         'role',
+      ],
+      // Weight 0: these decide nothing by score, they only block. Phrases are
+      // multi-word or distinctive so that "off" never matches on its own.
+      RuleGroupId.digest: <String>[
+        'job alert',
+        'job alerts',
+        'jobs for you',
+        'jobs you may be interested',
+        'recommended jobs',
+        'recommended for you',
+        'jobs matching',
+        'similar jobs',
+        'more jobs',
+        'top jobs',
+        'new jobs',
+        'view all jobs',
+        'browse jobs',
+        'job digest',
+        'weekly digest',
+        'daily digest',
+        'apply now',
+        'apply today',
+        'unsubscribe from job alerts',
+        'newsletter',
+        'webinar',
+        'free trial',
+        'off your first',
+        'off your next',
+        'limited time',
+        'flash sale',
+        'sale ends',
+        'shop now',
+        'order now',
+        'promo code',
+        'discount code',
+        'upgrade your plan',
       ],
     },
     rejectionPhrases: <String>[
@@ -579,10 +762,8 @@ class RuleSet {
   Map<String, Object?> toJson() => <String, Object?>{
     'groups': groups,
     'tiers': tiers.map(
-      (String id, RuleGroupTier tier) => MapEntry<String, String>(
-        id,
-        tier.name,
-      ),
+      (String id, RuleGroupTier tier) =>
+          MapEntry<String, String>(id, tier.name),
     ),
     'rejectionPhrases': rejectionPhrases,
     'interviewPlatformDomains': interviewPlatformDomains,

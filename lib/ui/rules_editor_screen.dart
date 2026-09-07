@@ -205,33 +205,41 @@ class _Explainer extends StatelessWidget {
   const _Explainer();
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.all(16),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Text(
-          'A message scores points for every phrase that matches. Subject '
-          'matches count double.',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Score alone is not enough to notify. A notification needs decisive '
-          'wording — one "Can notify" phrase — or two separate "Review only" '
-          'phrases in a mail that also contains job wording. Without that, the '
-          'mail is listed under "Needs review" instead.',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'That rule is what stops five weak hints from conspiring to flag an '
-          'automated "we received your application" mail.',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall;
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            'A message scores points for every phrase that matches. Subject '
+            'matches count double, because senders put the point of the mail '
+            'in the subject line.',
+            style: style,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Score alone never notifies. A notification needs decisive '
+            'wording: one "Can notify" phrase, mail from an interview '
+            'platform, or ambiguous interview wording backed by both '
+            'scheduling and job wording. Anything weaker is listed under '
+            '"Needs review".',
+            style: style,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Three things take a notification away again: rejection wording '
+            '(unless offer wording overrides it), job-alert or marketing '
+            'wording when the decisive phrase was only in the body, and '
+            '"Recruiter list only" wording, which can never notify however '
+            'much it scores.',
+            style: style,
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _GroupTile extends StatelessWidget {
@@ -251,7 +259,11 @@ class _GroupTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ExpansionTile(
-    title: Text('${spec.label}  (+${spec.weight} each)'),
+    title: Text(
+      spec.weight == 0
+          ? '${spec.label}  (no score, blocks only)'
+          : '${spec.label}  (+${spec.weight} each)',
+    ),
     subtitle: Text('${phrases.length} phrases · ${tier.label}'),
     childrenPadding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
     children: <Widget>[
